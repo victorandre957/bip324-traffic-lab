@@ -1,0 +1,20 @@
+nodes:
+  - name: tank-0001
+    config: |
+      listen=1
+      uacomment=bip324-lab-miner
+
+  - name: tank-0002
+    config: |
+      listen=1
+      uacomment=bip324-lab-traffic-a
+
+  - name: tank-0003
+    config: |
+      listen=1
+      uacomment=bip324-lab-traffic-b
+
+plugins:
+  preNetwork:
+    noise-generator:
+      entrypoint: "plugins/noise-generator"

@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ printf "%s-%s" .Release.Name .Values.client.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: noise-generator
+    role: client
+spec:
+  restartPolicy: Always
+  initContainers:
+    - name: wait-for-server
+      image: {{ .Values.client.image }}
+      command: ["python3", "/scripts/wait_http.py"]
+      env:
+        - name: SERVER
+          value: "{{ printf "%s-%s" .Release.Name .Values.server.name }}"
+        - name: PORT
+          value: "{{ .Values.server.port }}"
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+  containers:
+    - name: noise-client
+      image: {{ .Values.client.image }}
+      imagePullPolicy: IfNotPresent
+      command: ["python3", "/scripts/http_client.py"]
+      env:
+        - name: SERVER
+          value: "{{ printf "%s-%s" .Release.Name .Values.server.name }}"
+        - name: PORT
+          value: "{{ .Values.server.port }}"
+        - name: MIN_SLEEP
+          value: "{{ .Values.client.intervalMinSec }}"
+        - name: MAX_SLEEP
+          value: "{{ .Values.client.intervalMaxSec }}"
+        - name: SEED
+          value: "{{ .Values.simulation.seed }}:http-client"
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      resources:
+        requests:
+          cpu: "25m"
+          memory: "32Mi"
+        limits:
+          cpu: "100m"
+          memory: "64Mi"
+  volumes:
+    - name: scripts
+      configMap:
+        name: {{ printf "%s-noise-scripts" .Release.Name }}

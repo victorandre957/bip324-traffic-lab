@@ -1,0 +1,20 @@
+Noise Generator deployed!
+
+  Server pod : noise-server   (HTTP server, port 8080, random-sized responses)
+  Client pod : noise-client   (continuous GET+POST requests to noise-server)
+
+  Streaming UDP:
+    server : noise-streaming-server (UDP 5000, steady small packets)
+    client : noise-streaming-client
+
+  TOR-like TCP:
+    server : noise-tor-server (TCP 9001, small bursty packets)
+    client : noise-tor-client
+
+  Torrent-like TCP:
+    server : noise-torrent-server (TCP 51413, chunked transfers)
+    client : noise-torrent-client
+
+Watch traffic:
+  kubectl logs -n {{ .Values.namespace }} noise-server -f
+  kubectl logs -n {{ .Values.namespace }} noise-client -f

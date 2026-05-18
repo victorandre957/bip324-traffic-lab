@@ -1,0 +1,16 @@
+chain: regtest
+
+collectLogs: true
+metricsExport: false
+
+image:
+  repository: bitcoindevproject/bitcoin
+  pullPolicy: IfNotPresent
+  tag: "28.1"
+
+defaultConfig: |
+  v2transport=1
+  debug=net
+  debug=mempool
+  logips=1
+  logtimemicros=1

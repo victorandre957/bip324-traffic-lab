@@ -1,0 +1,9 @@
+apiVersion: v2
+name: isp-sniffer
+description: >
+  Deploys a privileged pod with hostNetwork=true running tcpdump on all
+  interfaces. Simulates an ISP-level passive observer that captures every
+  packet in the cluster (Bitcoin P2P v2 + noise traffic).
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

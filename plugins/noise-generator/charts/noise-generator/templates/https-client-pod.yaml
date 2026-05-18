@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ printf "%s-%s" .Release.Name .Values.httpsClient.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: noise-generator
+    role: https-client
+spec:
+  restartPolicy: Always
+  containers:
+    - name: https-client
+      image: {{ .Values.httpsClient.image }}
+      imagePullPolicy: IfNotPresent
+      command: ["python3", "/scripts/https_client.py"]
+      env:
+        - name: SERVER
+          value: "{{ printf "%s-%s" .Release.Name .Values.httpsServer.name }}"
+        - name: PORT
+          value: "{{ .Values.httpsServer.port }}"
+        - name: MIN_SLEEP
+          value: "{{ .Values.httpsClient.intervalMinSec }}"
+        - name: MAX_SLEEP
+          value: "{{ .Values.httpsClient.intervalMaxSec }}"
+        - name: SEED
+          value: "{{ .Values.simulation.seed }}:https-client"
+      volumeMounts:
+        - name: tls
+          mountPath: /tls
+          readOnly: true
+        - name: scripts
+          mountPath: /scripts
+      resources:
+        requests:
+          cpu: "25m"
+          memory: "32Mi"
+        limits:
+          cpu: "100m"
+          memory: "64Mi"
+  volumes:
+    - name: tls
+      secret:
+        secretName: {{ printf "%s-%s" .Release.Name .Values.httpsServer.name }}
+    - name: scripts
+      configMap:
+        name: {{ printf "%s-noise-scripts" .Release.Name }}

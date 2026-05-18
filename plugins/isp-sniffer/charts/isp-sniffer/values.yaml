@@ -1,0 +1,8 @@
+namespace: default
+
+sniffer:
+  name: isp-sniffer
+  image: nicolaka/netshoot:latest
+  filter: ""
+  snaplen: 128
+  captureDir: /captures

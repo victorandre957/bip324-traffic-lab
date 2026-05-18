@@ -1,0 +1,49 @@
+{{- range $index := until (int .Values.torRelay.replicas) }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ printf "%s-%s-%d" $.Release.Name $.Values.torRelay.name $index }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    app: noise-generator
+    role: tor-relay
+spec:
+  restartPolicy: Always
+  containers:
+    - name: tor-relay
+      image: {{ $.Values.torRelay.image }}
+      imagePullPolicy: IfNotPresent
+      ports:
+        - name: tor-or
+          containerPort: {{ $.Values.torRelay.port }}
+          protocol: TCP
+      command: ["/bin/bash", "/scripts/tor_relay_entrypoint.sh"]
+      env:
+        - name: TORDA_HOST
+          value: "{{ printf "%s-%s" $.Release.Name $.Values.torServer.name }}.{{ $.Values.namespace }}.svc.cluster.local"
+        - name: TOR_RELAY_PORT
+          value: "{{ $.Values.torRelay.port }}"
+        - name: TOR_OR_PORT
+          value: "{{ $.Values.torServer.port }}"
+        - name: TOR_DIR_PORT
+          value: "{{ $.Values.torServer.dirPort }}"
+        - name: TOR_V3_IDENTITY
+          value: "{{ $.Values.torServer.v3Identity }}"
+        - name: TOR_FINGERPRINT
+          value: "{{ $.Values.torServer.fingerprint }}"
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      resources:
+        requests:
+          cpu: "75m"
+          memory: "128Mi"
+        limits:
+          cpu: "300m"
+          memory: "256Mi"
+  volumes:
+    - name: scripts
+      configMap:
+        name: {{ printf "%s-noise-scripts" $.Release.Name }}
+{{- end }}

@@ -1,0 +1,8 @@
+apiVersion: v2
+name: noise-generator
+description: >
+  Deploys deterministic HTTP, HTTPS/TLS, UDP streaming, private Tor, and
+  BitTorrent/libtorrent background traffic for an ISP-observer scenario.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ printf "%s-%s" .Release.Name .Values.sniffer.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: isp-sniffer
+    role: observer
+    capture-release: {{ .Release.Name }}
+spec:
+  hostNetwork: true
+  restartPolicy: Always
+  containers:
+    - name: isp-sniffer
+      image: {{ .Values.sniffer.image }}
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        privileged: true
+        capabilities:
+          add:
+            - NET_ADMIN
+            - NET_RAW
+
+      command: ["/bin/bash", "-c"]
+      args:
+        - |
+          set -e
+          mkdir -p {{ .Values.sniffer.captureDir }}
+          FILTER="{{ .Values.sniffer.filter }}"
+          PCAP_FILE="{{ .Values.sniffer.captureDir }}/isp-capture.pcap"
+
+          echo "[isp-sniffer] pcap ${PCAP_FILE}"
+          tcpdump -i any -n -U -s {{ .Values.sniffer.snaplen }} \
+            -w "${PCAP_FILE}" \
+            ${FILTER:+$FILTER}
+
+      volumeMounts:
+        - name: captures
+          mountPath: {{ .Values.sniffer.captureDir }}
+
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+
+  volumes:
+    - name: captures
+      emptyDir: {}

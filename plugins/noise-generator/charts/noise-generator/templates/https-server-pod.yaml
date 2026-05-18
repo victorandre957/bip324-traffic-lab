@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ printf "%s-%s" .Release.Name .Values.httpsServer.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: noise-generator
+    role: https-server
+spec:
+  restartPolicy: Always
+  containers:
+    - name: https-server
+      image: {{ .Values.httpsServer.image }}
+      imagePullPolicy: IfNotPresent
+      ports:
+        - name: https
+          containerPort: {{ .Values.httpsServer.port }}
+          protocol: TCP
+      command: ["python3", "/scripts/https_server.py"]
+      env:
+        - name: MIN_BYTES
+          value: "{{ .Values.httpsServer.minBytes }}"
+        - name: MAX_BYTES
+          value: "{{ .Values.httpsServer.maxBytes }}"
+        - name: PORT
+          value: "{{ .Values.httpsServer.port }}"
+        - name: SEED
+          value: "{{ .Values.simulation.seed }}:https-server"
+      volumeMounts:
+        - name: tls
+          mountPath: /tls
+          readOnly: true
+        - name: scripts
+          mountPath: /scripts
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "128Mi"
+  volumes:
+    - name: tls
+      secret:
+        secretName: {{ printf "%s-%s" .Release.Name .Values.httpsServer.name }}
+    - name: scripts
+      configMap:
+        name: {{ printf "%s-noise-scripts" .Release.Name }}

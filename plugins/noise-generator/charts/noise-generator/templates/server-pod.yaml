@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ printf "%s-%s" .Release.Name .Values.server.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: noise-generator
+    role: server
+spec:
+  restartPolicy: Always
+  containers:
+    - name: noise-server
+      image: {{ .Values.server.image }}
+      imagePullPolicy: IfNotPresent
+      ports:
+        - name: http
+          containerPort: {{ .Values.server.port }}
+          protocol: TCP
+      command: ["python3", "/scripts/http_server.py"]
+      env:
+        - name: MIN_BYTES
+          value: "{{ .Values.server.minBytes }}"
+        - name: MAX_BYTES
+          value: "{{ .Values.server.maxBytes }}"
+        - name: PORT
+          value: "{{ .Values.server.port }}"
+        - name: SEED
+          value: "{{ .Values.simulation.seed }}:http-server"
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "128Mi"
+  volumes:
+    - name: scripts
+      configMap:
+        name: {{ printf "%s-noise-scripts" .Release.Name }}

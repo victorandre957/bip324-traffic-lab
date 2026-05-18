@@ -1,0 +1,16 @@
+[project]
+name = "bip324-traffic-lab"
+version = "0.1.0"
+description = "Warnet-based traffic lab for passive Bitcoin P2P v2/BIP324 analysis"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "click==8.1.7",
+    "warnet",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+warnet = { path = "../warnet", editable = true }
