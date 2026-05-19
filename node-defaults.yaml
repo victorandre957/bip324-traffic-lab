@@ -1,6 +1,6 @@
 chain: regtest
 
-collectLogs: true
+collectLogs: false
 metricsExport: false
 
 image:
