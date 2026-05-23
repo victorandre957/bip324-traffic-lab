@@ -21,7 +21,7 @@ class NoiseClient:
         self.rng = random.Random(seed)
 
     def run_forever(self):
-        print(f"[noise-client] target {self.server}:{self.port}", flush=True)
+        print(f"[http-client] target {self.server}:{self.port}", flush=True)
         while True:
             self.request_count += 1
             self.get_payload()

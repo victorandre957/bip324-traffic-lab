@@ -5,12 +5,12 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     app: noise-generator
-    role: server
+    role: http-server
 spec:
   type: ClusterIP
   selector:
     app: noise-generator
-    role: server
+    role: http-server
   ports:
     - name: http
       port: {{ .Values.server.port }}

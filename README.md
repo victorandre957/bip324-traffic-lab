@@ -80,7 +80,8 @@ bip324-traffic-lab/results/
 After installing the analyzer dependencies, analyze the generated data with:
 
 ```bash
-python analyzer/run_analysis.py --data-dir bip324-traffic-lab/results
+cd bip324-traffic-analysis
+python run_analysis.py --data-dir ../bip324-traffic-lab/results
 ```
 
 ## Reproducibility
@@ -102,3 +103,7 @@ deterministic.
 - private/local Tor traffic
 - BitTorrent traffic with `libtorrent` on `6881`
 
+## Example result
+
+A completed run produces one capture, one Bitcoin Core debug log per tank,
+`ip-map.txt`, and `metadata.json` with the seed used for the run.

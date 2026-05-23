@@ -5,11 +5,11 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     app: noise-generator
-    role: server
+    role: http-server
 spec:
   restartPolicy: Always
   containers:
-    - name: noise-server
+    - name: noise-http-server
       image: {{ .Values.server.image }}
       imagePullPolicy: IfNotPresent
       ports:

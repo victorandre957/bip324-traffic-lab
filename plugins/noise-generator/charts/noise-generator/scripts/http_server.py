@@ -41,6 +41,6 @@ class NoiseRequestHandler(http.server.BaseHTTPRequestHandler):
         return
 
 
-print(f"[noise-server] listening on {PORT}", flush=True)
+print(f"[http-server] listening on {PORT}", flush=True)
 server = http.server.HTTPServer(("0.0.0.0", PORT), NoiseRequestHandler)
 server.serve_forever()

@@ -8,9 +8,3 @@ dependencies = [
     "click==8.1.7",
     "warnet",
 ]
-
-[tool.uv]
-package = false
-
-[tool.uv.sources]
-warnet = { path = "../warnet", editable = true }

@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     app: noise-generator
-    role: client
+    role: http-client
 spec:
   restartPolicy: Always
   initContainers:
@@ -21,7 +21,7 @@ spec:
         - name: scripts
           mountPath: /scripts
   containers:
-    - name: noise-client
+    - name: noise-http-client
       image: {{ .Values.client.image }}
       imagePullPolicy: IfNotPresent
       command: ["python3", "/scripts/http_client.py"]

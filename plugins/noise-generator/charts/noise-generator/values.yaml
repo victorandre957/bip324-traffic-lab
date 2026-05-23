@@ -4,14 +4,14 @@ simulation:
   seed: ""
 
 server:
-  name: noise-server
+  name: noise-http-server
   image: python:3.12-alpine
   port: 8080
   minBytes: 4096
   maxBytes: 131072
 
 client:
-  name: noise-client
+  name: noise-http-client
   image: python:3.12-alpine
   intervalMinSec: 1
   intervalMaxSec: 8
