@@ -4,12 +4,13 @@ collectLogs: false
 metricsExport: false
 
 image:
-  repository: bitcoindevproject/bitcoin
+  repository: bip324-traffic-lab-bitcoin
   pullPolicy: IfNotPresent
-  tag: "28.1"
+  tag: "28.1.0-decoy"
 
 defaultConfig: |
   v2transport=1
+  v2transportdecoypackets=100
   debug=net
   debug=mempool
   logips=1

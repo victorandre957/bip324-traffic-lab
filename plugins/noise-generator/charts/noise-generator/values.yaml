@@ -42,6 +42,22 @@ streamingClient:
   image: python:3.12-alpine
   helloIntervalSec: 2
 
+obfs4Server:
+  name: noise-obfs4-server
+  image: python:3.12-alpine
+  port: 14444
+  minBytes: 64
+  maxBytes: 4096
+  intervalMs: 250
+
+obfs4Client:
+  name: noise-obfs4-client
+  image: python:3.12-alpine
+  minSleepMs: 200
+  maxSleepMs: 1400
+  minBytes: 64
+  maxBytes: 2048
+
 torServer:
   name: noise-tor-da
   image: bitcoindevproject/tor-da:latest

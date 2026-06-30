@@ -7,6 +7,10 @@ Noise Generator deployed!
     server : noise-streaming-server (UDP 5000, steady small packets)
     client : noise-streaming-client
 
+  obfs4-shaped TCP:
+    server : noise-obfs4-server (TCP 14444, encrypted-looking bursts)
+    client : noise-obfs4-client
+
   Local Tor:
     server : noise-tor-da (TCP 9001/9030)
     client : noise-tor-client

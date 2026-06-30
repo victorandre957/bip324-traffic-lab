@@ -50,6 +50,24 @@ class SimulationPaths:
         return repository_root / ".venv" / "bin" / "warnet"
 
 
+@dataclass(frozen=True)
+class NodeTrafficProfile:
+    role: str
+    tx_probability: float
+    output_choices: tuple[int, ...]
+    amount_min: float
+    amount_max: float
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            "role": self.role,
+            "tx_probability": self.tx_probability,
+            "output_choices": list(self.output_choices),
+            "amount_min": self.amount_min,
+            "amount_max": self.amount_max,
+        }
+
+
 class CommandRunner:
     def run(
         self,
@@ -74,12 +92,18 @@ class CommandRunner:
 
 
 class BitcoinNode:
+    default_regtest_p2p_port = 18444
+    settings_path = "/root/.bitcoin/regtest/settings.json"
+
     def __init__(self, pod_name: str, namespace: str, commands: CommandRunner):
         self.pod_name = pod_name
         self.namespace = namespace
         self.commands = commands
+        self._pod_ip: str | None = None
+        self._p2p_port: int | None = None
+        self._p2p_port_source = "default-regtest"
 
-    def cli(self, *arguments: str, check: bool = True) -> str:
+    def exec(self, *arguments: str, check: bool = True) -> str:
         return self.commands.output(
             "kubectl",
             "-n",
@@ -89,10 +113,12 @@ class BitcoinNode:
             "--container",
             "bitcoincore",
             "--",
-            "bitcoin-cli",
             *arguments,
             check=check,
         )
+
+    def cli(self, *arguments: str, check: bool = True) -> str:
+        return self.exec("bitcoin-cli", *arguments, check=check)
 
     def wallet_cli(self, *arguments: str, check: bool = True) -> str:
         return self.cli("-rpcwallet=traffic", *arguments, check=check)
@@ -108,8 +134,59 @@ class BitcoinNode:
         self.cli("-named", "createwallet", "wallet_name=traffic", check=False)
         self.cli("loadwallet", "traffic", check=False)
 
-    def add_peer(self, peer_name: str) -> None:
-        self.cli("addnode", peer_name, "onetry", check=False)
+    def pod_ip(self) -> str:
+        if self._pod_ip is None:
+            self._pod_ip = self.commands.output(
+                "kubectl",
+                "-n",
+                self.namespace,
+                "get",
+                "pod",
+                self.pod_name,
+                "-o",
+                "jsonpath={.status.podIP}",
+            )
+        return self._pod_ip
+
+    def p2p_port(self) -> int:
+        if self._p2p_port is None:
+            randomized_port = self._read_randomized_p2p_port()
+            if randomized_port:
+                self._p2p_port = randomized_port
+                self._p2p_port_source = "settings.json randomizedp2pport"
+            else:
+                self._p2p_port = self.default_regtest_p2p_port
+        return self._p2p_port
+
+    def p2p_address(self) -> str:
+        return f"{self.pod_ip()}:{self.p2p_port()}"
+
+    def add_peer(self, peer: "BitcoinNode") -> None:
+        self.cli("addnode", peer.p2p_address(), "onetry", check=False)
+
+    def _read_randomized_p2p_port(self) -> int | None:
+        raw_settings = self.exec(
+            "sh",
+            "-c",
+            f"cat {self.settings_path} 2>/dev/null || true",
+            check=False,
+        )
+        if not raw_settings:
+            return None
+        try:
+            settings = json.loads(raw_settings)
+            port = settings.get("randomizedp2pport") if isinstance(settings, dict) else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return int(port) if port else None
+
+    def connection_info(self) -> dict[str, str | int]:
+        return {
+            "pod_ip": self.pod_ip(),
+            "p2p_port": self.p2p_port(),
+            "p2p_port_source": self._p2p_port_source,
+            "p2p_address": self.p2p_address(),
+        }
 
     def block_count(self) -> int:
         return int(self.cli("getblockcount"))
@@ -129,78 +206,147 @@ class BitcoinNode:
     def send_to(self, address: str, amount: float) -> str:
         return self.wallet_cli("sendtoaddress", address, f"{amount:.8f}")
 
+    def send_many(self, outputs: dict[str, float]) -> str:
+        formatted_outputs = {
+            address: round(amount, 8)
+            for address, amount in outputs.items()
+        }
+        return self.wallet_cli("sendmany", "", json.dumps(formatted_outputs, sort_keys=True))
+
 
 class BitcoinTrafficGenerator:
     miner_name = "tank-0001"
-    node_names = ("tank-0001", "tank-0002", "tank-0003")
+    initial_node_names = ("tank-0001", "tank-0002", "tank-0003")
+    delayed_node_names = ("tank-0004", "tank-0005")
+    node_names = initial_node_names + delayed_node_names
+    traffic_profiles = {
+        "tank-0001": NodeTrafficProfile("miner", 0.15, (1, 2), 0.00005, 0.00015),
+        "tank-0002": NodeTrafficProfile("heavy_sender", 0.95, (4, 8, 12, 16), 0.00010, 0.00080),
+        "tank-0003": NodeTrafficProfile("light_sender", 0.45, (1, 2, 4), 0.00005, 0.00030),
+        "tank-0004": NodeTrafficProfile("delayed_bursty_sender", 0.80, (8, 12, 20), 0.00010, 0.00100),
+        "tank-0005": NodeTrafficProfile("delayed_quiet_peer", 0.20, (1, 2), 0.00003, 0.00012),
+    }
 
     def __init__(self, namespace: str, commands: CommandRunner, seed: str):
         self.namespace = namespace
         self.commands = commands
         self.rng = random.Random(seed)
-        self.nodes = [BitcoinNode(pod_name, namespace, commands) for pod_name in self.node_names]
-        self.miner = self.nodes[0]
-        self.traffic_nodes = [node for node in self.nodes if node.pod_name != self.miner_name]
+        self.nodes_by_name = {
+            pod_name: BitcoinNode(pod_name, namespace, commands)
+            for pod_name in self.node_names
+        }
+        self.nodes = [self.nodes_by_name[pod_name] for pod_name in self.node_names]
+        self.initial_nodes = [self.nodes_by_name[pod_name] for pod_name in self.initial_node_names]
+        self.delayed_nodes = [self.nodes_by_name[pod_name] for pod_name in self.delayed_node_names]
+        self.active_nodes = list(self.initial_nodes)
+        self.miner = self.nodes_by_name[self.miner_name]
+        self.traffic_nodes = [node for node in self.active_nodes if node.pod_name != self.miner_name]
+        self.delayed_nodes_joined = False
+        self.node_addresses: dict[str, dict[str, str | int]] = {}
+
+    @classmethod
+    def profile_metadata(cls) -> dict[str, dict[str, object]]:
+        return {
+            node_name: profile.metadata()
+            for node_name, profile in cls.traffic_profiles.items()
+        }
 
     def prepare(self) -> None:
         self._wait_for_nodes()
+        self._cache_node_addresses()
         for node in self.nodes:
             node.create_wallet()
-        self._connect_bitcoin_mesh()
+        self._connect_initial_mesh()
         self.miner.generate_blocks(120)
-        self._wait_for_height(120)
-        self._fund_traffic_nodes()
-        self._wait_until_traffic_nodes_have_balance()
+        self._wait_for_height(120, self.active_nodes)
+        self._fund_nodes(self.traffic_nodes)
+        self._wait_until_nodes_have_balance(self.traffic_nodes)
 
     def run_until(self, deadline: float) -> None:
         next_block_time = time.time()
         next_transaction_time = time.time()
+        delayed_join_time = time.time() + max(0, deadline - time.time()) / 2
         while time.time() < deadline:
             now = time.time()
+            if not self.delayed_nodes_joined and now >= delayed_join_time:
+                self._join_delayed_nodes_safely()
             if now >= next_transaction_time:
                 self._send_mesh_transactions_safely()
-                next_transaction_time = now + 5
+                next_transaction_time = now + self._next_transaction_interval()
             if now >= next_block_time:
                 self._generate_block_safely()
-                next_block_time = now + 15
+                next_block_time = now + self._next_block_interval()
             time.sleep(1)
 
     def _wait_for_nodes(self) -> None:
         for node in self.nodes:
             node.wait_until_rpc_ready()
 
-    def _connect_bitcoin_mesh(self) -> None:
+    def _cache_node_addresses(self) -> None:
+        self.node_addresses = {
+            node.pod_name: node.connection_info()
+            for node in self.nodes
+        }
+
+    def _connect_initial_mesh(self) -> None:
         for _ in range(30):
-            for node in self.nodes:
-                for peer_name in self.node_names:
-                    if peer_name != node.pod_name:
-                        node.add_peer(peer_name)
-            if all(node.connection_count() >= 2 for node in self.nodes):
+            for node in self.initial_nodes:
+                for peer in self.initial_nodes:
+                    if peer.pod_name != node.pod_name:
+                        node.add_peer(peer)
+            if all(node.connection_count() >= 2 for node in self.initial_nodes):
                 return
             time.sleep(2)
-        raise RuntimeError("Bitcoin P2P mesh did not connect")
+        raise RuntimeError("Initial Bitcoin P2P mesh did not connect")
 
-    def _fund_traffic_nodes(self) -> None:
-        for node in self.traffic_nodes:
+    def _join_delayed_nodes_safely(self) -> None:
+        try:
+            self._join_delayed_nodes()
+        except (RuntimeError, subprocess.CalledProcessError) as exception:
+            print(f"[run] delayed node join skipped: {exception}")
+
+    def _join_delayed_nodes(self) -> None:
+        print("[run] joining delayed Bitcoin nodes")
+        current_height = self.miner.block_count()
+        for _ in range(30):
+            for node in self.delayed_nodes:
+                for peer in self.initial_nodes:
+                    node.add_peer(peer)
+            if all(node.connection_count() >= len(self.initial_node_names) for node in self.delayed_nodes):
+                break
+            time.sleep(2)
+        else:
+            raise RuntimeError("Delayed Bitcoin nodes did not connect")
+
+        self._wait_for_height(current_height, self.delayed_nodes)
+        self._fund_nodes(self.delayed_nodes)
+        self._wait_until_nodes_have_balance(self.delayed_nodes)
+        self.active_nodes.extend(self.delayed_nodes)
+        self.traffic_nodes = [node for node in self.active_nodes if node.pod_name != self.miner_name]
+        self.delayed_nodes_joined = True
+
+    def _fund_nodes(self, nodes: list[BitcoinNode]) -> None:
+        for node in nodes:
             self.miner.send_to(node.new_address(), 5)
         self.miner.generate_blocks(1)
-        self._wait_for_height(121)
+        self._wait_for_height(self.miner.block_count(), self.active_nodes + nodes)
 
-    def _wait_for_height(self, expected_height: int) -> None:
+    def _wait_for_height(self, expected_height: int, nodes: list[BitcoinNode] | None = None) -> None:
+        watched_nodes = nodes or self.active_nodes
         for _ in range(90):
-            heights = [node.block_count() for node in self.nodes]
+            heights = [node.block_count() for node in watched_nodes]
             if min(heights) >= expected_height:
                 return
             time.sleep(2)
         raise RuntimeError(f"Bitcoin nodes did not reach height {expected_height}")
 
-    def _wait_until_traffic_nodes_have_balance(self) -> None:
+    def _wait_until_nodes_have_balance(self, nodes: list[BitcoinNode]) -> None:
         for _ in range(60):
-            balances = [node.balance() for node in self.traffic_nodes]
+            balances = [node.balance() for node in nodes]
             if all(balance > 0 for balance in balances):
                 return
             time.sleep(2)
-        raise RuntimeError("Traffic nodes did not receive spendable balance")
+        raise RuntimeError("Bitcoin nodes did not receive spendable balance")
 
     def _send_mesh_transactions_safely(self) -> None:
         try:
@@ -209,14 +355,31 @@ class BitcoinTrafficGenerator:
             print(f"[run] transaction round skipped: {exception}")
 
     def _send_mesh_transactions(self) -> None:
-        for index, sender in enumerate(self.nodes):
+        for index, sender in enumerate(self.active_nodes):
             if sender.balance() <= 0.001:
                 continue
-            receiver = self.nodes[(index + 1) % len(self.nodes)]
-            sender.send_to(receiver.new_address(), self._transaction_amount())
+            profile = self.traffic_profiles[sender.pod_name]
+            if self.rng.random() > profile.tx_probability:
+                continue
+            receiver = self.active_nodes[(index + 1) % len(self.active_nodes)]
+            sender.send_many(self._transaction_outputs(sender, receiver))
 
-    def _transaction_amount(self) -> float:
-        return self.rng.uniform(0.0001, 0.001)
+    def _transaction_outputs(self, sender: BitcoinNode, receiver: BitcoinNode) -> dict[str, float]:
+        profile = self.traffic_profiles[sender.pod_name]
+        output_count = self.rng.choice(profile.output_choices)
+        return {
+            receiver.new_address(): self._transaction_amount(profile)
+            for _ in range(output_count)
+        }
+
+    def _transaction_amount(self, profile: NodeTrafficProfile) -> float:
+        return self.rng.uniform(profile.amount_min, profile.amount_max)
+
+    def _next_transaction_interval(self) -> float:
+        return self.rng.uniform(2.0, 9.0)
+
+    def _next_block_interval(self) -> float:
+        return self.rng.uniform(10.0, 24.0)
 
     def _generate_block_safely(self) -> None:
         try:
@@ -321,6 +484,8 @@ class SimulationRunner:
         "https-client",
         "streaming-server",
         "streaming-client",
+        "obfs4-server",
+        "obfs4-client",
         "tor-da",
         "tor-relay",
         "tor-client",
@@ -342,6 +507,7 @@ class SimulationRunner:
         self.run_started_at = datetime.now(UTC).isoformat()
         self.commands = CommandRunner()
         self._run_directory: Path | None = None
+        self.bitcoin_node_addresses: dict[str, dict[str, str | int]] = {}
 
     @property
     def run_directory(self) -> Path:
@@ -368,6 +534,8 @@ class SimulationRunner:
                 self._derive_seed("bitcoin-traffic"),
             )
             traffic_generator.prepare()
+            self.bitcoin_node_addresses = traffic_generator.node_addresses
+            self._write_metadata(status="running")
             self._run_capture_window(traffic_generator)
         except Exception:
             run_status = "failed"
@@ -441,9 +609,22 @@ class SimulationRunner:
             "run_started_at": self.run_started_at,
             "metadata_written_at": datetime.now(UTC).isoformat(),
             "duration_minutes": self.duration_minutes,
+            "delayed_bitcoin_nodes": list(BitcoinTrafficGenerator.delayed_node_names),
+            "delayed_bitcoin_join_after_seconds": self.duration_minutes * 60 / 2,
+            "bitcoin_traffic_profiles": BitcoinTrafficGenerator.profile_metadata(),
+            "bitcoin_timing_profile": {
+                "transaction_interval_seconds": "uniform[2.0, 9.0]",
+                "block_interval_seconds": "uniform[10.0, 24.0]",
+                "jitter_seed": self._derive_seed("bitcoin-traffic"),
+            },
             "namespace": self.namespace,
             "seed": self.seed,
             "component_seeds": self._component_seeds(),
+            "bitcoin_node_p2p_addresses": self.bitcoin_node_addresses,
+            "bitcoin_node_image": {
+                "repository": "bip324-traffic-lab-bitcoin",
+                "tag": "28.1.0-decoy",
+            },
             "reproducibility_note": (
                 "The seed fixes generated payloads, transaction amounts, and configured "
                 "noise choices. Kubernetes scheduling and packet timing can still change "
@@ -452,8 +633,9 @@ class SimulationRunner:
             "startup_order": [
                 "isp-sniffer",
                 "noise-generator",
-                "bitcoin-nodes",
+                "initial-bitcoin-nodes",
                 "bitcoin-traffic",
+                "delayed-bitcoin-nodes-at-midpoint",
             ],
             "tools": {
                 "warnet_binary": str(self.paths.warnet_binary),
@@ -514,8 +696,17 @@ class SimulationRunner:
             "wide",
         )
         ip_map = self.run_directory / "ip-map.txt"
+        bitcoin_addresses = json.dumps(
+            self.bitcoin_node_addresses,
+            indent=2,
+            sort_keys=True,
+        )
         ip_map.write_text(
-            f"PODS\n{pod_table}\n\nSERVICES\n{service_table}\n",
+            (
+                f"PODS\n{pod_table}\n\n"
+                f"SERVICES\n{service_table}\n\n"
+                f"BITCOIN RANDOMIZED P2P ADDRESSES\n{bitcoin_addresses}\n"
+            ),
             encoding="utf-8",
         )
 
@@ -538,7 +729,28 @@ class SimulationRunner:
         )
 
     def _stop_network(self) -> None:
-        self.commands.run(self.paths.warnet_binary, "down", check=False)
+        releases = self.commands.output(
+            "helm",
+            "list",
+            "--namespace",
+            self.namespace,
+            "--short",
+            check=False,
+        )
+        scenario_releases = [
+            release
+            for release in releases.splitlines()
+            if release.startswith("tank-") or release.startswith("noise-generator-")
+        ]
+        if scenario_releases:
+            self.commands.run(
+                "helm",
+                "uninstall",
+                "--namespace",
+                self.namespace,
+                *scenario_releases,
+                check=False,
+            )
 
     def _kubectl_output(self, *arguments: str, check: bool = True) -> str:
         return self.commands.output("kubectl", "-n", self.namespace, *arguments, check=check)

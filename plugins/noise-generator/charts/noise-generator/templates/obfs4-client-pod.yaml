@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ printf "%s-%s" .Release.Name .Values.obfs4Client.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: noise-generator
+    role: obfs4-client
+spec:
+  restartPolicy: Always
+  containers:
+    - name: obfs4-client
+      image: {{ .Values.obfs4Client.image }}
+      imagePullPolicy: IfNotPresent
+      command: ["python3", "/scripts/obfs4_noise_client.py"]
+      env:
+        - name: SERVER
+          value: "{{ printf "%s-%s" .Release.Name .Values.obfs4Server.name }}"
+        - name: PORT
+          value: "{{ .Values.obfs4Server.port }}"
+        - name: MIN_SLEEP_MS
+          value: "{{ .Values.obfs4Client.minSleepMs }}"
+        - name: MAX_SLEEP_MS
+          value: "{{ .Values.obfs4Client.maxSleepMs }}"
+        - name: MIN_BYTES
+          value: "{{ .Values.obfs4Client.minBytes }}"
+        - name: MAX_BYTES
+          value: "{{ .Values.obfs4Client.maxBytes }}"
+        - name: SEED
+          value: "{{ .Values.simulation.seed }}:obfs4-client"
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      resources:
+        requests:
+          cpu: "25m"
+          memory: "32Mi"
+        limits:
+          cpu: "100m"
+          memory: "64Mi"
+  volumes:
+    - name: scripts
+      configMap:
+        name: {{ printf "%s-noise-scripts" .Release.Name }}

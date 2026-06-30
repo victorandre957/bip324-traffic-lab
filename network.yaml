@@ -14,6 +14,16 @@ nodes:
       listen=1
       uacomment=bip324-lab-traffic-b
 
+  - name: tank-0004
+    config: |
+      listen=1
+      uacomment=bip324-lab-delayed-a
+
+  - name: tank-0005
+    config: |
+      listen=1
+      uacomment=bip324-lab-delayed-b
+
 plugins:
   preNetwork:
     noise-generator:
