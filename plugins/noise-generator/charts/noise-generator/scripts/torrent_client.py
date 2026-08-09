@@ -55,10 +55,11 @@ def download_once(index):
     session.remove_torrent(handle)
 
 
-fetch_torrent()
 run_index = 0
 while True:
     try:
+        if not TORRENT.exists():
+            fetch_torrent()
         run_index += 1
         download_once(run_index)
     except Exception as exception:

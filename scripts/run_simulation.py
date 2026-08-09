@@ -68,6 +68,23 @@ class NodeTrafficProfile:
         }
 
 
+@dataclass(frozen=True)
+class BlockLoadProfile:
+    transactions_per_block: int
+    outputs_per_transaction: int
+    output_amount: float
+
+    def metadata(self) -> dict[str, object]:
+        estimated_vbytes = self.transactions_per_block * (110 + 31 * self.outputs_per_transaction)
+        return {
+            "transactions_per_block": self.transactions_per_block,
+            "outputs_per_transaction": self.outputs_per_transaction,
+            "output_amount_btc": self.output_amount,
+            "estimated_payload_bytes": estimated_vbytes,
+            "note": "Estimated transaction payload only; actual block size varies with signatures and relay timing.",
+        }
+
+
 class CommandRunner:
     def run(
         self,
@@ -89,6 +106,15 @@ class CommandRunner:
             stderr=subprocess.PIPE,
         )
         return result.stdout.strip()
+
+    def combined_output(self, *command: str | Path) -> str:
+        result = subprocess.run(
+            [str(part) for part in command],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        return result.stdout
 
 
 class BitcoinNode:
@@ -135,8 +161,10 @@ class BitcoinNode:
         self.cli("loadwallet", "traffic", check=False)
 
     def pod_ip(self) -> str:
-        if self._pod_ip is None:
-            self._pod_ip = self.commands.output(
+        if self._pod_ip:
+            return self._pod_ip
+        for _ in range(30):
+            pod_ip = self.commands.output(
                 "kubectl",
                 "-n",
                 self.namespace,
@@ -145,8 +173,13 @@ class BitcoinNode:
                 self.pod_name,
                 "-o",
                 "jsonpath={.status.podIP}",
+                check=False,
             )
-        return self._pod_ip
+            if pod_ip:
+                self._pod_ip = pod_ip
+                return pod_ip
+            time.sleep(1)
+        raise RuntimeError(f"{self.pod_name} has no Kubernetes pod IP")
 
     def p2p_port(self) -> int:
         if self._p2p_port is None:
@@ -163,6 +196,26 @@ class BitcoinNode:
 
     def add_peer(self, peer: "BitcoinNode") -> None:
         self.cli("addnode", peer.p2p_address(), "onetry", check=False)
+
+    def peer_info(self) -> list[dict[str, object]]:
+        raw_info = self.cli("getpeerinfo", check=False)
+        if not raw_info:
+            return []
+        try:
+            parsed = json.loads(raw_info)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+
+    def has_outbound_connection_to(self, peer: "BitcoinNode") -> bool:
+        return peer.p2p_address() in self.outbound_peer_addresses()
+
+    def outbound_peer_addresses(self) -> set[str]:
+        return {
+            str(info["addr"])
+            for info in self.peer_info()
+            if info.get("addr") and not info.get("inbound", False)
+        }
 
     def _read_randomized_p2p_port(self) -> int | None:
         raw_settings = self.exec(
@@ -194,9 +247,6 @@ class BitcoinNode:
     def balance(self) -> float:
         return float(self.wallet_cli("getbalance", check=False) or 0)
 
-    def connection_count(self) -> int:
-        return int(self.cli("getconnectioncount", check=False) or 0)
-
     def new_address(self) -> str:
         return self.wallet_cli("getnewaddress")
 
@@ -226,11 +276,34 @@ class BitcoinTrafficGenerator:
         "tank-0004": NodeTrafficProfile("delayed_bursty_sender", 0.80, (8, 12, 20), 0.00010, 0.00100),
         "tank-0005": NodeTrafficProfile("delayed_quiet_peer", 0.20, (1, 2), 0.00003, 0.00012),
     }
+    block_load_profiles = {
+        "small": BlockLoadProfile(4, 64, 0.00001),
+        "medium": BlockLoadProfile(12, 256, 0.00001),
+        "mainnet-like": BlockLoadProfile(96, 512, 0.00001),
+    }
+    initial_topology_edges = (
+        ("tank-0001", "tank-0002"),
+        ("tank-0002", "tank-0003"),
+    )
+    delayed_topology_edges = (
+        ("tank-0004", "tank-0002"),
+        ("tank-0004", "tank-0003"),
+        ("tank-0005", "tank-0003"),
+    )
+    configured_network_conditions = {
+        "tank-0001": {"delay_ms": 8, "jitter_ms": 2, "loss_percent": 0.0},
+        "tank-0002": {"delay_ms": 24, "jitter_ms": 5, "loss_percent": 0.0},
+        "tank-0003": {"delay_ms": 65, "jitter_ms": 12, "loss_percent": 0.0},
+        "tank-0004": {"delay_ms": 120, "jitter_ms": 25, "loss_percent": 0.0},
+        "tank-0005": {"delay_ms": 180, "jitter_ms": 40, "loss_percent": 0.2},
+    }
 
-    def __init__(self, namespace: str, commands: CommandRunner, seed: str):
+    def __init__(self, namespace: str, commands: CommandRunner, seed: str, block_profile: str):
         self.namespace = namespace
         self.commands = commands
         self.rng = random.Random(seed)
+        self.block_profile_name = block_profile
+        self.block_profile = self.block_load_profiles[block_profile]
         self.nodes_by_name = {
             pod_name: BitcoinNode(pod_name, namespace, commands)
             for pod_name in self.node_names
@@ -243,6 +316,8 @@ class BitcoinTrafficGenerator:
         self.traffic_nodes = [node for node in self.active_nodes if node.pod_name != self.miner_name]
         self.delayed_nodes_joined = False
         self.node_addresses: dict[str, dict[str, str | int]] = {}
+        self.block_output_addresses: list[str] = []
+        self.network_condition_status: dict[str, dict[str, object]] = {}
 
     @classmethod
     def profile_metadata(cls) -> dict[str, dict[str, object]]:
@@ -251,16 +326,22 @@ class BitcoinTrafficGenerator:
             for node_name, profile in cls.traffic_profiles.items()
         }
 
+    @classmethod
+    def block_profile_metadata(cls, name: str) -> dict[str, object]:
+        return cls.block_load_profiles[name].metadata()
+
     def prepare(self) -> None:
         self._wait_for_nodes()
         self._cache_node_addresses()
         for node in self.nodes:
             node.create_wallet()
-        self._connect_initial_mesh()
+        self._connect_edges(self.initial_topology_edges)
+        self._collect_network_condition_status()
         self.miner.generate_blocks(120)
         self._wait_for_height(120, self.active_nodes)
         self._fund_nodes(self.traffic_nodes)
         self._wait_until_nodes_have_balance(self.traffic_nodes)
+        self._prepare_block_output_addresses()
 
     def run_until(self, deadline: float) -> None:
         next_block_time = time.time()
@@ -288,16 +369,31 @@ class BitcoinTrafficGenerator:
             for node in self.nodes
         }
 
-    def _connect_initial_mesh(self) -> None:
-        for _ in range(30):
-            for node in self.initial_nodes:
-                for peer in self.initial_nodes:
-                    if peer.pod_name != node.pod_name:
-                        node.add_peer(peer)
-            if all(node.connection_count() >= 2 for node in self.initial_nodes):
+    def _connect_edges(
+        self,
+        edges: tuple[tuple[str, str], ...],
+    ) -> None:
+        for _ in range(60):
+            pending_edges = [
+                (source_name, target_name)
+                for source_name, target_name in edges
+                if not self.nodes_by_name[source_name].has_outbound_connection_to(
+                    self.nodes_by_name[target_name]
+                )
+            ]
+            if not pending_edges:
                 return
+            for source_name, target_name in pending_edges:
+                self.nodes_by_name[source_name].add_peer(self.nodes_by_name[target_name])
             time.sleep(2)
-        raise RuntimeError("Initial Bitcoin P2P mesh did not connect")
+        diagnostics = {
+            source_name: sorted(self.nodes_by_name[source_name].outbound_peer_addresses())
+            for source_name in sorted({source for source, _ in pending_edges})
+        }
+        raise UserFacingError(
+            "Bitcoin topology edges did not connect. "
+            f"Pending edges: {pending_edges}. Connected outbound peers: {diagnostics}"
+        )
 
     def _join_delayed_nodes_safely(self) -> None:
         try:
@@ -308,15 +404,7 @@ class BitcoinTrafficGenerator:
     def _join_delayed_nodes(self) -> None:
         print("[run] joining delayed Bitcoin nodes")
         current_height = self.miner.block_count()
-        for _ in range(30):
-            for node in self.delayed_nodes:
-                for peer in self.initial_nodes:
-                    node.add_peer(peer)
-            if all(node.connection_count() >= len(self.initial_node_names) for node in self.delayed_nodes):
-                break
-            time.sleep(2)
-        else:
-            raise RuntimeError("Delayed Bitcoin nodes did not connect")
+        self._connect_edges(self.delayed_topology_edges)
 
         self._wait_for_height(current_height, self.delayed_nodes)
         self._fund_nodes(self.delayed_nodes)
@@ -324,6 +412,24 @@ class BitcoinTrafficGenerator:
         self.active_nodes.extend(self.delayed_nodes)
         self.traffic_nodes = [node for node in self.active_nodes if node.pod_name != self.miner_name]
         self.delayed_nodes_joined = True
+
+    def _collect_network_condition_status(self) -> None:
+        for node in self.nodes:
+            output = self.commands.combined_output(
+                "kubectl",
+                "-n",
+                self.namespace,
+                "logs",
+                node.pod_name,
+                "--container",
+                "latency-shaper",
+            ).strip()
+            configured = dict(self.configured_network_conditions[node.pod_name])
+            self.network_condition_status[node.pod_name] = {
+                **configured,
+                "applied": "[netem] applied" in output,
+                "sidecar_output": output,
+            }
 
     def _fund_nodes(self, nodes: list[BitcoinNode]) -> None:
         for node in nodes:
@@ -383,9 +489,33 @@ class BitcoinTrafficGenerator:
 
     def _generate_block_safely(self) -> None:
         try:
+            self._prime_mempool_for_block()
             self.miner.generate_blocks(1)
         except subprocess.CalledProcessError as exception:
             print(f"[run] block generation skipped: {exception}")
+
+    def _prepare_block_output_addresses(self) -> None:
+        receivers = self.traffic_nodes or [self.miner]
+        self.block_output_addresses = [
+            receivers[index % len(receivers)].new_address()
+            for index in range(self.block_profile.outputs_per_transaction)
+        ]
+
+    def _prime_mempool_for_block(self) -> None:
+        if not self.block_output_addresses:
+            return
+        print(
+            "[run] priming mempool for "
+            f"{self.block_profile_name} block profile "
+            f"({self.block_profile.transactions_per_block} transactions x "
+            f"{self.block_profile.outputs_per_transaction} outputs)"
+        )
+        outputs = {
+            address: self.block_profile.output_amount
+            for address in self.block_output_addresses
+        }
+        for _ in range(self.block_profile.transactions_per_block):
+            self.miner.send_many(outputs)
 
 
 class SnifferDeployment:
@@ -397,6 +527,7 @@ class SnifferDeployment:
         self.commands = commands
         self.selector = f"app=isp-sniffer,capture-release={self.release_name}"
         self.installed = False
+        self.pod_name = ""
 
     def deploy(self) -> str:
         self.commands.run(
@@ -413,6 +544,7 @@ class SnifferDeployment:
         )
         self.installed = True
         sniffer_pod = self._wait_for_pod_name()
+        self.pod_name = sniffer_pod
         self._wait_until_ready()
         self._wait_until_capturing(sniffer_pod)
         return sniffer_pod
@@ -424,6 +556,48 @@ class SnifferDeployment:
             self.release_name,
             "--namespace",
             self.namespace,
+            check=False,
+        )
+        # A standalone Pod can remain Terminating after Helm reports success.
+        # Waiting here prevents a subsequent run from trying to patch that old Pod.
+        self.commands.run(
+            "kubectl",
+            "-n",
+            self.namespace,
+            "wait",
+            "pod",
+            "-l",
+            self.selector,
+            "--for=delete",
+            "--timeout=60s",
+            check=False,
+        )
+
+    def write_diagnostics(self, destination: Path) -> None:
+        pod_name = self.pod_name or self._wait_for_existing_pod_name()
+        commands = [
+            ("pod description", "kubectl", "-n", self.namespace, "describe", "pod", pod_name),
+            ("container logs", "kubectl", "-n", self.namespace, "logs", pod_name),
+            ("previous container logs", "kubectl", "-n", self.namespace, "logs", pod_name, "--previous"),
+        ]
+        sections = []
+        for title, *command in commands:
+            sections.append(f"===== {title} =====\n")
+            sections.append(self.commands.combined_output(*command))
+            sections.append("\n")
+        destination.write_text("".join(sections), encoding="utf-8")
+
+    def _wait_for_existing_pod_name(self) -> str:
+        return self.commands.output(
+            "kubectl",
+            "-n",
+            self.namespace,
+            "get",
+            "pods",
+            "-l",
+            self.selector,
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
             check=False,
         )
 
@@ -499,15 +673,18 @@ class SimulationRunner:
         namespace: str,
         paths: SimulationPaths,
         seed: str | None = None,
+        block_profile: str = "medium",
     ):
         self.duration_minutes = duration_minutes
         self.namespace = namespace
         self.paths = paths
         self.seed = seed or self._generate_seed()
+        self.block_profile = block_profile
         self.run_started_at = datetime.now(UTC).isoformat()
         self.commands = CommandRunner()
         self._run_directory: Path | None = None
         self.bitcoin_node_addresses: dict[str, dict[str, str | int]] = {}
+        self.bitcoin_network_conditions: dict[str, dict[str, object]] = {}
 
     @property
     def run_directory(self) -> Path:
@@ -526,25 +703,40 @@ class SimulationRunner:
             self._write_metadata(status="created")
             self._write_metadata(status="running")
             sniffer_pod = sniffer.deploy()
-            self._deploy_network()
             network_deployed = True
+            self._deploy_network()
+            self._wait_for_scenario_ready()
             traffic_generator = BitcoinTrafficGenerator(
                 self.namespace,
                 self.commands,
                 self._derive_seed("bitcoin-traffic"),
+                self.block_profile,
             )
             traffic_generator.prepare()
             self.bitcoin_node_addresses = traffic_generator.node_addresses
+            self.bitcoin_network_conditions = traffic_generator.network_condition_status
+            self._start_obfs4_noise()
             self._write_metadata(status="running")
             self._run_capture_window(traffic_generator)
         except Exception:
             run_status = "failed"
+            if self._run_directory is not None:
+                try:
+                    self._write_network_diagnostics()
+                except Exception as exception:
+                    print(f"[run] could not save network diagnostics: {exception}")
             raise
         finally:
             try:
                 if sniffer_pod:
+                    self._stop_packet_capture(sniffer_pod)
                     self._collect_results(sniffer_pod)
             finally:
+                if run_status == "failed" and self._run_directory is not None and sniffer.installed:
+                    try:
+                        sniffer.write_diagnostics(self.run_directory / "sniffer-startup-diagnostics.txt")
+                    except Exception as exception:
+                        print(f"[run] could not save sniffer diagnostics: {exception}")
                 if network_deployed:
                     self._stop_network()
                 if sniffer.installed:
@@ -612,10 +804,53 @@ class SimulationRunner:
             "delayed_bitcoin_nodes": list(BitcoinTrafficGenerator.delayed_node_names),
             "delayed_bitcoin_join_after_seconds": self.duration_minutes * 60 / 2,
             "bitcoin_traffic_profiles": BitcoinTrafficGenerator.profile_metadata(),
+            "bitcoin_topology_profile": {
+                "name": "sparse-mixed-reachability",
+                "initial_edges": [list(edge) for edge in BitcoinTrafficGenerator.initial_topology_edges],
+                "delayed_edges": [list(edge) for edge in BitcoinTrafficGenerator.delayed_topology_edges],
+                "unreachable_from_inbound_peers": ["tank-0005"],
+                "note": "Topology drives the lab only and is not consumed by passive detection.",
+            },
+            "bitcoin_network_conditions": self.bitcoin_network_conditions or {
+                name: {**condition, "applied": None}
+                for name, condition in BitcoinTrafficGenerator.configured_network_conditions.items()
+            },
             "bitcoin_timing_profile": {
                 "transaction_interval_seconds": "uniform[2.0, 9.0]",
                 "block_interval_seconds": "uniform[10.0, 24.0]",
                 "jitter_seed": self._derive_seed("bitcoin-traffic"),
+            },
+            "bitcoin_block_load_profile": {
+                "name": self.block_profile,
+                **BitcoinTrafficGenerator.block_profile_metadata(self.block_profile),
+            },
+            "passive_capture_profile": {
+                "pcap": "isp-capture.pcap",
+                "interface": "bridge",
+                "snaplen_bytes": 256,
+                "timestamp_precision": "nanoseconds",
+                "buffer_size_kib": 4096,
+                "offload_state_artifact": "capture-environment.txt",
+                "packet_loss_artifact": "tcpdump-stats.log",
+                "graceful_stop_before_copy": True,
+                "tcp_ip_fingerprint_fields": [
+                    "ip_version",
+                    "ip_ttl_or_ipv6_hop_limit",
+                    "ipv4_fragment_flags",
+                    "tcp_window_size",
+                    "tcp_mss",
+                    "tcp_window_scale",
+                    "tcp_sack_permitted",
+                    "tcp_timestamp_present",
+                    "tcp_options_order",
+                    "tcp_sequence_number",
+                    "tcp_ack_number",
+                    "tcp_retransmission_overlap",
+                ],
+                "analysis_role": (
+                    "Complementary passive context for grouping prediction quality by "
+                    "visible TCP/IP stack signature; not validation ground truth."
+                ),
             },
             "namespace": self.namespace,
             "seed": self.seed,
@@ -632,9 +867,10 @@ class SimulationRunner:
             ),
             "startup_order": [
                 "isp-sniffer",
-                "noise-generator",
+                "noise-generator-pods",
                 "initial-bitcoin-nodes",
                 "bitcoin-traffic",
+                "obfs4-traffic-after-bitcoin-ready",
                 "delayed-bitcoin-nodes-at-midpoint",
             ],
             "tools": {
@@ -658,6 +894,73 @@ class SimulationRunner:
             },
         )
 
+    def _wait_for_scenario_ready(self) -> None:
+        tank_pods = [f"pod/{name}" for name in BitcoinTrafficGenerator.node_names]
+        try:
+            self.commands.run(
+                "kubectl",
+                "-n",
+                self.namespace,
+                "wait",
+                *tank_pods,
+                "--for=condition=Ready",
+                "--timeout=4m",
+            )
+            self.commands.run(
+                "kubectl",
+                "-n",
+                self.namespace,
+                "wait",
+                "pod",
+                "-l",
+                "app=noise-generator",
+                "--for=condition=Ready",
+                "--timeout=4m",
+            )
+        except subprocess.CalledProcessError as exception:
+            raise UserFacingError(
+                "The Warnet scenario did not become ready. "
+                "See network-startup-diagnostics.txt in the run directory."
+            ) from exception
+
+    def _start_obfs4_noise(self) -> None:
+        pod_name = self.commands.output(
+            "kubectl",
+            "-n",
+            self.namespace,
+            "get",
+            "pod",
+            "-l",
+            "app=noise-generator,role=obfs4-client",
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+        )
+        if not pod_name:
+            raise UserFacingError("The obfs4 noise client pod was not found.")
+        self.commands.run(
+            "kubectl",
+            "-n",
+            self.namespace,
+            "exec",
+            pod_name,
+            "--",
+            "touch",
+            "/traffic-control/start",
+        )
+        print("[run] obfs4 noise traffic started after Bitcoin setup")
+
+    def _write_network_diagnostics(self) -> None:
+        diagnostics = self.commands.combined_output(
+            "kubectl", "-n", self.namespace, "get", "pods", "-o", "wide"
+        )
+        diagnostics += "\n\n"
+        diagnostics += self.commands.combined_output(
+            "kubectl", "-n", self.namespace, "get", "events", "--sort-by=.lastTimestamp"
+        )
+        (self.run_directory / "network-startup-diagnostics.txt").write_text(
+            diagnostics, encoding="utf-8"
+        )
+
     def _run_capture_window(self, traffic_generator: BitcoinTrafficGenerator) -> None:
         print(f"[run] simulation running for {self.duration_minutes} minutes")
         traffic_generator.run_until(time.time() + self.duration_minutes * 60)
@@ -669,12 +972,39 @@ class SimulationRunner:
             "/captures/isp-capture.pcap",
             self.run_directory / "isp-capture.pcap",
         )
+        self._copy_from_pod(
+            sniffer_pod,
+            "/captures/tcpdump-stats.log",
+            self.run_directory / "tcpdump-stats.log",
+        )
+        self._copy_from_pod(
+            sniffer_pod,
+            "/captures/capture-environment.txt",
+            self.run_directory / "capture-environment.txt",
+        )
         for tank_pod in self._tank_pods():
             self._copy_from_pod(
                 tank_pod,
                 "/root/.bitcoin/regtest/debug.log",
                 self.run_directory / f"{tank_pod}-debug.log",
             )
+
+    def _stop_packet_capture(self, sniffer_pod: str) -> None:
+        self.commands.run(
+            "kubectl",
+            "-n",
+            self.namespace,
+            "exec",
+            sniffer_pod,
+            "--",
+            "sh",
+            "-c",
+            "pkill -2 tcpdump 2>/dev/null || true; "
+            "for i in $(seq 1 50); do "
+            "test -f /captures/capture-complete && exit 0; sleep 0.1; "
+            "done; exit 1",
+            check=False,
+        )
 
     def _write_pod_ip_map(self) -> None:
         pod_table = self.commands.output(
@@ -770,6 +1100,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory where run-* artifacts are written. Defaults to bip324-traffic-lab/results.",
     )
+    parser.add_argument(
+        "--block-profile",
+        choices=tuple(BitcoinTrafficGenerator.block_load_profiles),
+        default="medium",
+        help="Mempool load generated before each mined block.",
+    )
     return parser.parse_args()
 
 
@@ -780,6 +1116,7 @@ def main() -> None:
         namespace=args.namespace,
         paths=SimulationPaths.from_script_location(args.output_dir),
         seed=args.seed,
+        block_profile=args.block_profile,
     )
     try:
         runner.run()

@@ -21,8 +21,13 @@ class StreamingClient:
     def run_forever(self):
         print(f"[streaming-client] target {self.server}:{self.port}", flush=True)
         while True:
-            self.send_hello_when_needed()
-            self.receive_stream()
+            try:
+                self.send_hello_when_needed()
+                self.receive_stream()
+            except OSError as exception:
+                # The client pod may start before the Kubernetes Service is in DNS.
+                print(f"[streaming-client] retrying after error: {exception}", flush=True)
+                time.sleep(2)
 
     def send_hello_when_needed(self):
         now = time.time()

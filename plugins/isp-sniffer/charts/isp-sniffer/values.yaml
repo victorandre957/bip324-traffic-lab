@@ -4,5 +4,11 @@ sniffer:
   name: isp-sniffer
   image: nicolaka/netshoot:latest
   filter: ""
-  snaplen: 128
+  # Minikube's data-plane bridge gives one observation per packet. Capturing on
+  # "any" duplicates Kubernetes Service/NAT legs and creates artificial fan-out.
+  interface: bridge
+  snaplen: 256
+  bufferSizeKiB: 4096
+  disableOffloads: false
+  offloadInterfaces: []
   captureDir: /captures

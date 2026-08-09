@@ -12,7 +12,10 @@ spec:
     - name: obfs4-client
       image: {{ .Values.obfs4Client.image }}
       imagePullPolicy: IfNotPresent
-      command: ["python3", "/scripts/obfs4_noise_client.py"]
+      command:
+        - "/bin/sh"
+        - "-c"
+        - "while [ ! -f /traffic-control/start ]; do sleep 0.2; done; exec python3 /scripts/obfs4_noise_client.py"
       env:
         - name: SERVER
           value: "{{ printf "%s-%s" .Release.Name .Values.obfs4Server.name }}"
@@ -31,6 +34,8 @@ spec:
       volumeMounts:
         - name: scripts
           mountPath: /scripts
+        - name: traffic-control
+          mountPath: /traffic-control
       resources:
         requests:
           cpu: "25m"
@@ -42,3 +47,5 @@ spec:
     - name: scripts
       configMap:
         name: {{ printf "%s-noise-scripts" .Release.Name }}
+    - name: traffic-control
+      emptyDir: {}

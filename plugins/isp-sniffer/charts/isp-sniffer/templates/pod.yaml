@@ -24,15 +24,42 @@ spec:
       command: ["/bin/bash", "-c"]
       args:
         - |
-          set -e
+          set -u
           mkdir -p {{ .Values.sniffer.captureDir }}
           FILTER="{{ .Values.sniffer.filter }}"
           PCAP_FILE="{{ .Values.sniffer.captureDir }}/isp-capture.pcap"
+          STATS_FILE="{{ .Values.sniffer.captureDir }}/tcpdump-stats.log"
+          ENV_FILE="{{ .Values.sniffer.captureDir }}/capture-environment.txt"
+
+          {
+            date -Ins 2>&1 || date 2>&1 || true
+            uname -a 2>&1 || true
+            tcpdump --version 2>&1 || true
+            ip -details link show 2>&1 || true
+            for IFACE_PATH in /sys/class/net/*; do
+              IFACE="${IFACE_PATH##*/}"
+              echo "[offloads] ${IFACE}"
+              ethtool -k "${IFACE}" 2>&1 || true
+            done
+          } > "${ENV_FILE}"
+
+          {{- if .Values.sniffer.disableOffloads }}
+          {{- range .Values.sniffer.offloadInterfaces }}
+          ethtool -K {{ . }} gro off lro off gso off tso off 2>> "${ENV_FILE}" || true
+          {{- end }}
+          {{- end }}
 
           echo "[isp-sniffer] pcap ${PCAP_FILE}"
-          tcpdump -i any -n -U -s {{ .Values.sniffer.snaplen }} \
+          tcpdump -i {{ .Values.sniffer.interface }} -n -U \
+            --time-stamp-precision=nano \
+            -B {{ .Values.sniffer.bufferSizeKiB }} \
+            -s {{ .Values.sniffer.snaplen }} \
             -w "${PCAP_FILE}" \
-            ${FILTER:+$FILTER}
+            ${FILTER:+$FILTER} 2> "${STATS_FILE}" &
+          TCPDUMP_PID=$!
+          wait "${TCPDUMP_PID}" || true
+          touch "{{ .Values.sniffer.captureDir }}/capture-complete"
+          sleep infinity
 
       volumeMounts:
         - name: captures

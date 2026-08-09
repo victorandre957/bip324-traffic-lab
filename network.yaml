@@ -1,27 +1,72 @@
 nodes:
   - name: tank-0001
+    extraContainers:
+      - name: latency-shaper
+        image: nicolaka/netshoot:latest
+        securityContext:
+          privileged: true
+          capabilities:
+            add: [NET_ADMIN]
+        command: ["/bin/sh", "-c"]
+        args: ["if tc qdisc replace dev eth0 root netem delay 8ms 2ms; then echo '[netem] applied delay=8ms jitter=2ms'; tc qdisc show dev eth0; else echo '[netem] failed delay=8ms jitter=2ms'; fi; sleep infinity"]
     config: |
       listen=1
       uacomment=bip324-lab-miner
 
   - name: tank-0002
+    extraContainers:
+      - name: latency-shaper
+        image: nicolaka/netshoot:latest
+        securityContext:
+          privileged: true
+          capabilities:
+            add: [NET_ADMIN]
+        command: ["/bin/sh", "-c"]
+        args: ["if tc qdisc replace dev eth0 root netem delay 24ms 5ms; then echo '[netem] applied delay=24ms jitter=5ms'; tc qdisc show dev eth0; else echo '[netem] failed delay=24ms jitter=5ms'; fi; sleep infinity"]
     config: |
       listen=1
       uacomment=bip324-lab-traffic-a
 
   - name: tank-0003
+    extraContainers:
+      - name: latency-shaper
+        image: nicolaka/netshoot:latest
+        securityContext:
+          privileged: true
+          capabilities:
+            add: [NET_ADMIN]
+        command: ["/bin/sh", "-c"]
+        args: ["if tc qdisc replace dev eth0 root netem delay 65ms 12ms; then echo '[netem] applied delay=65ms jitter=12ms'; tc qdisc show dev eth0; else echo '[netem] failed delay=65ms jitter=12ms'; fi; sleep infinity"]
     config: |
       listen=1
       uacomment=bip324-lab-traffic-b
 
   - name: tank-0004
+    extraContainers:
+      - name: latency-shaper
+        image: nicolaka/netshoot:latest
+        securityContext:
+          privileged: true
+          capabilities:
+            add: [NET_ADMIN]
+        command: ["/bin/sh", "-c"]
+        args: ["if tc qdisc replace dev eth0 root netem delay 120ms 25ms; then echo '[netem] applied delay=120ms jitter=25ms'; tc qdisc show dev eth0; else echo '[netem] failed delay=120ms jitter=25ms'; fi; sleep infinity"]
     config: |
       listen=1
       uacomment=bip324-lab-delayed-a
 
   - name: tank-0005
+    extraContainers:
+      - name: latency-shaper
+        image: nicolaka/netshoot:latest
+        securityContext:
+          privileged: true
+          capabilities:
+            add: [NET_ADMIN]
+        command: ["/bin/sh", "-c"]
+        args: ["if tc qdisc replace dev eth0 root netem delay 180ms 40ms loss 0.2%; then echo '[netem] applied delay=180ms jitter=40ms loss=0.2%'; tc qdisc show dev eth0; else echo '[netem] failed delay=180ms jitter=40ms loss=0.2%'; fi; sleep infinity"]
     config: |
-      listen=1
+      listen=0
       uacomment=bip324-lab-delayed-b
 
 plugins:
